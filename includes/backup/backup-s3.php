@@ -515,13 +515,32 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 		if ( $fp_in && is_resource( $fp_in ) ) {
 			fclose( $fp_in );
 		}
+		if ( $fp_gz && is_resource( $fp_gz ) ) {
+			gzclose( $fp_gz );
+		}
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
 	while ( ! feof( $fp_in ) ) {
-		gzwrite( $fp_gz, fread( $fp_in, 8192 ) );
+		$chunk = fread( $fp_in, 8192 );
+		if ( $chunk === false ) {
+			fclose( $fp_in );
+			gzclose( $fp_gz );
+			ndbi_core_backup_s3_set_last_status( 'error', __( 'Failed to read DB file during compression.', 'ndbi-core' ) );
+			ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Failed to read DB file during compression.', 'ndbi-core' ) );
+			ndbi_core_backup_s3_cleanup_run( $run_id );
+			return;
+		}
+		if ( gzwrite( $fp_gz, $chunk ) === false ) {
+			fclose( $fp_in );
+			gzclose( $fp_gz );
+			ndbi_core_backup_s3_set_last_status( 'error', __( 'Failed to write gzip file (disk full?).', 'ndbi-core' ) );
+			ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Failed to write gzip file (disk full?).', 'ndbi-core' ) );
+			ndbi_core_backup_s3_cleanup_run( $run_id );
+			return;
+		}
 	}
 	fclose( $fp_in );
 	gzclose( $fp_gz );

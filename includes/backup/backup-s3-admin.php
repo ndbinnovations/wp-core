@@ -207,6 +207,12 @@ function ndbi_core_backup_s3_render_settings() {
 	echo '<h1>' . esc_html__( 'Backup settings', 'ndbi-core' ) . '</h1>';
 	echo '<p class="ndbi-backup-nav"><a href="' . esc_url( $dashboard_url ) . '">' . esc_html__( 'Dashboard', 'ndbi-core' ) . '</a> | ' . esc_html__( 'Backup Settings', 'ndbi-core' ) . '</p>';
 
+	if ( ! $use_constant ) {
+		echo '<div class="notice notice-warning"><p><strong>' . esc_html__( 'Security recommendation', 'ndbi-core' ) . ':</strong> ';
+		echo esc_html__( 'The Secret Access Key entered below is stored in the database in plaintext. Anyone with access to wp_options (e.g. SQL injection, rogue plugins, or a leaked database backup) can read it. For production sites, define NDBI_CORE_BACKUP_SECRET_KEY in wp-config.php instead — the key will not be stored in the database.', 'ndbi-core' );
+		echo '</p></div>';
+	}
+
 	$presets = ndbi_core_backup_s3_get_provider_presets();
 	$provider = isset( $settings['provider'] ) ? $settings['provider'] : 'b2';
 	$current_preset = isset( $presets[ $provider ] ) ? $presets[ $provider ] : $presets['b2'];
@@ -245,7 +251,8 @@ function ndbi_core_backup_s3_render_settings() {
 		echo '<input name="ndbi_core_backup_s3[app_key]" type="hidden" value="" />';
 	} else {
 		echo '<input name="ndbi_core_backup_s3[app_key]" type="password" id="ndbi_s3_app_key" value="" class="regular-text" autocomplete="off" />';
-		echo '<p class="description">' . esc_html__( 'Leave blank to keep existing. Or define NDBI_CORE_BACKUP_SECRET_KEY in wp-config.php.', 'ndbi-core' ) . '</p>';
+		echo '<p class="description"><strong>' . esc_html__( 'Stored in plaintext in the database.', 'ndbi-core' ) . '</strong> ';
+		echo esc_html__( 'Leave blank to keep existing. For production, define NDBI_CORE_BACKUP_SECRET_KEY in wp-config.php so the key is never stored.', 'ndbi-core' ) . '</p>';
 	}
 	echo '</td></tr>';
 
