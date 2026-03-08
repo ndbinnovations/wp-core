@@ -236,7 +236,51 @@ function ndbi_core_backup_s3_get_tables() {
 }
 
 /**
+ * Path to the orchestrator lock file (one backup at a time across concurrent requests).
+ *
+ * @return string Lock file path.
+ */
+function ndbi_core_backup_s3_orchestrator_lock_file() {
+	$upload_dir = wp_upload_dir();
+	$base       = isset( $upload_dir['basedir'] ) ? $upload_dir['basedir'] : sys_get_temp_dir();
+	return $base . '/.ndbi-backup-orchestrator.lock';
+}
+
+/**
+ * Acquire exclusive lock for orchestrator start; prevents concurrent backup starts.
+ * Caller must call ndbi_core_backup_s3_orchestrator_lock_release() when done.
+ *
+ * @return resource|false Lock file handle or false on failure.
+ */
+function ndbi_core_backup_s3_orchestrator_lock_acquire() {
+	$path = ndbi_core_backup_s3_orchestrator_lock_file();
+	$fp   = @fopen( $path, 'c' );
+	if ( ! $fp ) {
+		return false;
+	}
+	if ( ! flock( $fp, LOCK_EX ) ) {
+		fclose( $fp );
+		return false;
+	}
+	return $fp;
+}
+
+/**
+ * Release the orchestrator lock.
+ *
+ * @param resource $fp Lock file handle from ndbi_core_backup_s3_orchestrator_lock_acquire().
+ */
+function ndbi_core_backup_s3_orchestrator_lock_release( $fp ) {
+	if ( is_resource( $fp ) ) {
+		flock( $fp, LOCK_UN );
+		fclose( $fp );
+	}
+}
+
+/**
  * Run the orchestrator: create run, schedule DB export and optionally file ZIP.
+ * Uses an exclusive lock so only one backup can start at a time; avoids race where
+ * two requests both see "no run" and then overwrite each other's run state.
  */
 function ndbi_core_backup_s3_run_orchestrator() {
 	$settings = ndbi_core_backup_s3_get_settings();
@@ -245,18 +289,37 @@ function ndbi_core_backup_s3_run_orchestrator() {
 		return;
 	}
 
+	$lock_fp = ndbi_core_backup_s3_orchestrator_lock_acquire();
+	if ( $lock_fp === false ) {
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not acquire backup lock.', 'ndbi-core' ) );
+		return;
+	}
+
 	$all_runs = get_option( NDBI_CORE_S3_RUN_OPTION, array() );
-	if ( ! empty( $all_runs ) && is_array( $all_runs ) ) {
+	if ( ! is_array( $all_runs ) ) {
+		$all_runs = array();
+	}
+	if ( ! empty( $all_runs ) ) {
+		ndbi_core_backup_s3_orchestrator_lock_release( $lock_fp );
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'A backup is already in progress.', 'ndbi-core' ) );
 		return;
 	}
 
 	$run_id = wp_date( 'Y-m-d-His' ) . '-' . substr( md5( uniqid( '', true ) ), 0, 6 );
+	$all_runs[ $run_id ] = array(); // Claim slot under lock so no other request can start.
+	update_option( NDBI_CORE_S3_RUN_OPTION, $all_runs );
+	ndbi_core_backup_s3_orchestrator_lock_release( $lock_fp );
+
 	$upload_dir = wp_upload_dir();
 	$base_dir   = isset( $upload_dir['basedir'] ) ? $upload_dir['basedir'] : sys_get_temp_dir();
 	$temp_dir   = $base_dir . '/ndbi-backup-' . $run_id . '-' . wp_generate_password( 16, false );
 	if ( ! wp_mkdir_p( $temp_dir ) ) {
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not create temp directory.', 'ndbi-core' ) );
+		$all_runs = get_option( NDBI_CORE_S3_RUN_OPTION, array() );
+		if ( is_array( $all_runs ) && isset( $all_runs[ $run_id ] ) ) {
+			unset( $all_runs[ $run_id ] );
+			update_option( NDBI_CORE_S3_RUN_OPTION, $all_runs );
+		}
 		return;
 	}
 	// Prevent web access to DB dumps and temp files (uploads dir is often public).
@@ -280,6 +343,22 @@ function ndbi_core_backup_s3_run_orchestrator() {
 	$all_runs = get_option( NDBI_CORE_S3_RUN_OPTION, array() );
 	if ( ! is_array( $all_runs ) ) {
 		$all_runs = array();
+	}
+	if ( ! isset( $all_runs[ $run_id ] ) ) {
+		ndbi_core_backup_s3_log( 'Orchestrator: run slot lost (concurrent overwrite?), aborting', array( 'run_id' => $run_id ) );
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'Backup slot lost; another backup may have started.', 'ndbi-core' ) );
+		if ( is_dir( $temp_dir ) ) {
+			$files = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $temp_dir, RecursiveDirectoryIterator::SKIP_DOTS ), RecursiveIteratorIterator::CHILD_FIRST );
+			foreach ( $files as $file ) {
+				if ( $file->isDir() ) {
+					@rmdir( $file->getRealPath() );
+				} else {
+					@unlink( $file->getRealPath() );
+				}
+			}
+			@rmdir( $temp_dir );
+		}
+		return;
 	}
 	$all_runs[ $run_id ] = $run_state;
 	update_option( NDBI_CORE_S3_RUN_OPTION, $all_runs );
@@ -438,6 +517,7 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 		}
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
 	while ( ! feof( $fp_in ) ) {
@@ -479,6 +559,12 @@ function ndbi_core_backup_s3_run_zip_scan( $run_id ) {
 
 	$exclude = array( 'cache', 'cache/*', '*.log', 'node_modules', 'node_modules/*', 'ndbi-backup-*' );
 	$files   = ndbi_core_backup_s3_list_files( $site_root, $site_root, $exclude );
+	// Exclude the backup temp dir by path so it never appears in the ZIP (e.g. when under uploads).
+	$temp_dir_normalized = rtrim( str_replace( '\\', '/', $run['temp_dir'] ), '/' );
+	$files = array_filter( $files, function ( $path ) use ( $temp_dir_normalized ) {
+		$path_normalized = str_replace( '\\', '/', $path );
+		return strpos( $path_normalized, $temp_dir_normalized ) !== 0;
+	} );
 	$run['zip_file_list'] = array_values( $files );
 	$run['zip_index']     = 0;
 	$run['zip_base_path'] = $site_root; // So zip_chunk uses same base for relative paths.
@@ -568,6 +654,7 @@ function ndbi_core_backup_s3_run_zip_chunk( $run_id ) {
 		ndbi_core_backup_s3_log( 'zip_chunk: ZipArchive open failed', array( 'run_id' => $run_id, 'zip_path' => $zip_path ) );
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not open ZIP for append.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not open ZIP for append.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
 	$base_len = strlen( $base_path ) + 1;
@@ -632,6 +719,7 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 		ndbi_core_backup_s3_log( 'upload: S3 client null', array( 'run_id' => $run_id, 'type' => $type ) );
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'S3 client not available.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'S3 client not available.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
 	$settings   = ndbi_core_backup_s3_get_settings();
@@ -650,9 +738,13 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 	try {
 		$size = filesize( $file_path );
 		if ( $size >= NDBI_CORE_S3_MULTIPART_THRESHOLD ) {
-			$client->upload( $bucket, $key, $fh, '', array(
-				'mup_threshold' => NDBI_CORE_S3_MULTIPART_THRESHOLD,
+			// Use MultipartUploader without ACL so ACL-disabled providers (B2, R2, S3 Object Ownership) succeed.
+			$uploader = new \Aws\S3\MultipartUploader( $client, $fh, array(
+				'bucket'        => $bucket,
+				'key'           => $key,
+				'part_size'     => NDBI_CORE_S3_MULTIPART_THRESHOLD,
 			) );
+			$uploader->upload();
 		} else {
 			$client->putObject( array(
 				'Bucket' => $bucket,
