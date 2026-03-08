@@ -196,6 +196,32 @@ function ndbi_core_backup_s3_s3_client() {
 }
 
 /**
+ * Test S3 connection using saved settings (list one object from the bucket).
+ *
+ * @return array{success: bool, message?: string} Success true, or success false with message.
+ */
+function ndbi_core_backup_s3_test_connection() {
+	$client = ndbi_core_backup_s3_s3_client();
+	if ( ! $client ) {
+		return array( 'success' => false, 'message' => __( 'Could not create S3 client. Check Access Key ID, Secret Key, bucket, and endpoint.', 'ndbi-core' ) );
+	}
+	$settings   = ndbi_core_backup_s3_get_settings();
+	$params = array(
+		'Bucket'  => $settings['bucket'],
+		'MaxKeys'  => 1,
+	);
+	if ( ! empty( $settings['path_prefix'] ) ) {
+		$params['Prefix'] = $settings['path_prefix'];
+	}
+	try {
+		$client->listObjectsV2( $params );
+		return array( 'success' => true );
+	} catch ( Exception $e ) {
+		return array( 'success' => false, 'message' => $e->getMessage() );
+	}
+}
+
+/**
  * Get WordPress database table list (with prefix).
  *
  * @return string[]

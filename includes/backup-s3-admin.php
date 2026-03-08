@@ -190,6 +190,18 @@ function ndbi_core_backup_s3_render_settings() {
 		esc_html_e( 'Preset applied. Review region/endpoint and click Save settings.', 'ndbi-core' );
 		echo '</p></div>';
 	}
+	if ( isset( $_GET['ndbi_backup_s3_test'] ) && '1' === $_GET['ndbi_backup_s3_test'] ) {
+		echo '<div class="notice notice-success is-dismissible"><p>';
+		esc_html_e( 'Connection test passed. Bucket is accessible with the saved settings.', 'ndbi-core' );
+		echo '</p></div>';
+	}
+	if ( isset( $_GET['ndbi_backup_s3_test_error'] ) && '1' === $_GET['ndbi_backup_s3_test_error'] ) {
+		$msg = get_transient( 'ndbi_backup_s3_test_error' );
+		delete_transient( 'ndbi_backup_s3_test_error' );
+		echo '<div class="notice notice-error is-dismissible"><p>';
+		echo esc_html( $msg ? $msg : __( 'Connection test failed.', 'ndbi-core' ) );
+		echo '</p></div>';
+	}
 
 	echo '<div class="wrap">';
 	echo '<h1>' . esc_html__( 'Backup settings', 'ndbi-core' ) . '</h1>';
@@ -261,6 +273,11 @@ function ndbi_core_backup_s3_render_settings() {
 		echo '<p class="description">' . esc_html__( 'Leave blank for Amazon S3 and Backblaze B2.', 'ndbi-core' ) . '</p>';
 	}
 	echo '</td></tr>';
+
+	// Test connection (uses saved settings).
+	echo '<tr><th scope="row">' . esc_html__( 'Test connection', 'ndbi-core' ) . '</th>';
+	echo '<td><button type="submit" name="ndbi_test_s3_connection" value="1" class="button button-secondary">' . esc_html__( 'Test connection', 'ndbi-core' ) . '</button>';
+	echo '<p class="description">' . esc_html__( 'List one object in the bucket to verify saved settings. Save settings first if you changed them.', 'ndbi-core' ) . '</p></td></tr>';
 
 	// Include files.
 	echo '<tr><th scope="row">' . esc_html__( 'Include files', 'ndbi-core' ) . '</th>';
@@ -363,6 +380,19 @@ function ndbi_core_backup_s3_handle_admin_post() {
 			wp_safe_redirect( add_query_arg( 'ndbi_backup_started', '1', admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG ) ) );
 			exit;
 		}
+	}
+
+	// Test S3 connection (uses saved settings).
+	if ( isset( $_POST['ndbi_test_s3_connection'] ) && isset( $_POST['ndbi_core_backup_s3_settings_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['ndbi_core_backup_s3_settings_nonce'] ) ), 'ndbi_core_backup_s3_settings' ) ) {
+		$result = ndbi_core_backup_s3_test_connection();
+		$redirect = ndbi_core_backup_s3_settings_url();
+		if ( ! empty( $result['success'] ) ) {
+			wp_safe_redirect( add_query_arg( 'ndbi_backup_s3_test', '1', $redirect ) );
+		} else {
+			set_transient( 'ndbi_backup_s3_test_error', isset( $result['message'] ) ? $result['message'] : __( 'Connection test failed.', 'ndbi-core' ), 45 );
+			wp_safe_redirect( add_query_arg( 'ndbi_backup_s3_test_error', '1', $redirect ) );
+		}
+		exit;
 	}
 
 	// Apply preset (set provider + default region/endpoint only).
