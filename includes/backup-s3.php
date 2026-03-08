@@ -307,8 +307,9 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 	}
 
 	global $wpdb;
-	$table = $tables[ $table_index ];
-	$db_file = $run['temp_dir'] . '/db.sql';
+	$table     = $tables[ $table_index ];
+	$table_esc = str_replace( '`', '``', $table );
+	$db_file   = $run['temp_dir'] . '/db.sql';
 	$fp = fopen( $db_file, 'a' );
 	if ( ! $fp ) {
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not open DB file for append.', 'ndbi-core' ) );
@@ -317,25 +318,24 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 	}
 
 	// Write table header.
-	$create = $wpdb->get_row( "SHOW CREATE TABLE `" . esc_sql( $table ) . "`", ARRAY_N );
+	$create = $wpdb->get_row( "SHOW CREATE TABLE `" . $table_esc . "`", ARRAY_N );
 	if ( $create ) {
 		fwrite( $fp, "\n-- Table: " . $table . "\n" );
-		fwrite( $fp, "DROP TABLE IF EXISTS `" . str_replace( '`', '``', $table ) . "`;\n" );
+		fwrite( $fp, "DROP TABLE IF EXISTS `" . $table_esc . "`;\n" );
 		fwrite( $fp, $create[1] . ";\n" );
 	}
-	$cols = $wpdb->get_col( "SHOW COLUMNS FROM `" . esc_sql( $table ) . "`" );
+	$cols = $wpdb->get_col( "SHOW COLUMNS FROM `" . $table_esc . "`" );
 		if ( $cols ) {
 			$batch_size = 500;
 			$offset     = 0;
-			$table_esc  = str_replace( '`', '``', $table );
 			while ( true ) {
 				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$rows = $wpdb->get_results( "SELECT * FROM `" . esc_sql( $table ) . "` LIMIT " . (int) $offset . ',' . (int) $batch_size, ARRAY_A );
+				$rows = $wpdb->get_results( "SELECT * FROM `" . $table_esc . "` LIMIT " . (int) $offset . ',' . (int) $batch_size, ARRAY_A );
 				if ( empty( $rows ) ) {
 					break;
 				}
 				foreach ( $rows as $row ) {
-					$col_names = '`' . implode( '`,`', array_map( 'esc_sql', array_keys( $row ) ) ) . '`';
+					$col_names = '`' . implode( '`,`', array_map( function( $col ) { return str_replace( '`', '``', $col ); }, array_keys( $row ) ) ) . '`';
 					$placeholders = implode( ',', array_fill( 0, count( $row ), '%s' ) );
 					$query = $wpdb->prepare( "INSERT INTO `" . $table_esc . "` (" . $col_names . ") VALUES (" . $placeholders . ")", array_values( $row ) );
 					fwrite( $fp, $query . ";\n" );
@@ -430,7 +430,7 @@ function ndbi_core_backup_s3_run_zip_scan( $run_id ) {
 		return;
 	}
 
-	$exclude = array( 'cache', 'cache/*', '*.log', 'node_modules', 'node_modules/*' );
+	$exclude = array( 'cache', 'cache/*', '*.log', 'node_modules', 'node_modules/*', 'ndbi-backup-*' );
 	$files   = ndbi_core_backup_s3_list_files( $site_root, $site_root, $exclude );
 	$run['zip_file_list'] = array_values( $files );
 	$run['zip_index']     = 0;
@@ -516,8 +516,8 @@ function ndbi_core_backup_s3_run_zip_chunk( $run_id ) {
 	ndbi_core_backup_s3_log( 'zip_chunk running', array( 'run_id' => $run_id, 'index' => $index, 'total' => count( $list ), 'zip_path' => $zip_path ) );
 
 	$zip = new ZipArchive();
-	$mode = file_exists( $zip_path ) ? ZipArchive::CREATE : ZipArchive::CREATE;
-	if ( $zip->open( $zip_path, $mode ) !== true ) {
+	// CREATE: first chunk creates the archive; subsequent chunks open existing for append.
+	if ( $zip->open( $zip_path, ZipArchive::CREATE ) !== true ) {
 		ndbi_core_backup_s3_log( 'zip_chunk: ZipArchive open failed', array( 'run_id' => $run_id, 'zip_path' => $zip_path ) );
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not open ZIP for append.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not open ZIP for append.', 'ndbi-core' ) );
@@ -590,11 +590,19 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 	$path_prefix = isset( $settings['path_prefix'] ) ? $settings['path_prefix'] : '';
 	$key        = $path_prefix . $key_suffix;
 
+	$fh = fopen( $file_path, 'rb' );
+	if ( $fh === false ) {
+		ndbi_core_backup_s3_log( 'upload: fopen failed', array( 'run_id' => $run_id, 'type' => $type, 'file_path' => $file_path ) );
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not open file for upload.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not open file for upload.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
+		return;
+	}
 	try {
 		$size = filesize( $file_path );
 		if ( $size >= NDBI_CORE_S3_MULTIPART_THRESHOLD ) {
 			// Omit ACL for S3-compatible APIs (e.g. B2, R2) that may not support it.
-			$client->upload( $bucket, $key, fopen( $file_path, 'rb' ), '', array(
+			$client->upload( $bucket, $key, $fh, '', array(
 				'mup_threshold' => NDBI_CORE_S3_MULTIPART_THRESHOLD,
 				'params'        => array( 'ACL' => null ),
 			) );
@@ -602,16 +610,18 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 			$client->putObject( array(
 				'Bucket' => $bucket,
 				'Key'    => $key,
-				'Body'   => fopen( $file_path, 'rb' ),
+				'Body'   => $fh,
 			) );
 		}
 	} catch ( Exception $e ) {
+		fclose( $fh );
 		ndbi_core_backup_s3_log( 'upload: exception', array( 'run_id' => $run_id, 'type' => $type, 'message' => $e->getMessage() ) );
 		ndbi_core_backup_s3_set_last_status( 'error', $e->getMessage() );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', $e->getMessage() );
 		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
+	fclose( $fh );
 
 	ndbi_core_backup_s3_log( 'upload success', array( 'run_id' => $run_id, 'type' => $type, 'key' => $key ) );
 	// Record last successful upload time for admin bar at-a-glance.
