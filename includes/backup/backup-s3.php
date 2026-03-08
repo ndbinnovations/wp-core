@@ -426,6 +426,9 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 	$fp_in     = fopen( $db_file, 'rb' );
 	$fp_gz     = gzopen( $gz_file, 'wb9' );
 	if ( ! $fp_in || ! $fp_gz ) {
+		if ( $fp_in && is_resource( $fp_in ) ) {
+			fclose( $fp_in );
+		}
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not gzip DB file.', 'ndbi-core' ) );
 		return;
@@ -699,8 +702,9 @@ function ndbi_core_backup_s3_maybe_finish_run( $run_id ) {
 	$temp_dir = $run['temp_dir'];
 	$remaining = false;
 	if ( is_dir( $temp_dir ) ) {
-		$files = @scandir( $temp_dir );
-		if ( is_array( $files ) && count( $files ) > 2 ) {
+		$files      = @scandir( $temp_dir );
+		$data_files = is_array( $files ) ? array_diff( $files, array( '.', '..', '.htaccess', 'index.php' ) ) : array();
+		if ( count( $data_files ) > 0 ) {
 			$remaining = true;
 		}
 	}
@@ -876,7 +880,7 @@ function ndbi_core_backup_s3_apply_retention( $retain_count ) {
 					continue;
 				}
 				$key = $obj['Key'];
-				if ( preg_match( '/-db-(\d{4}-\d{2}-\d{2}-\d{6})\.sql\.gz$/', $key, $m ) || preg_match( '/-files-(\d{4}-\d{2}-\d{2}-\d{6})\.zip$/', $key, $m ) ) {
+				if ( preg_match( '/-db-(\d{4}-\d{2}-\d{2}-\d{6}(-[a-f0-9]{6})?)\.sql\.gz$/', $key, $m ) || preg_match( '/-files-(\d{4}-\d{2}-\d{2}-\d{6}(-[a-f0-9]{6})?)\.zip$/', $key, $m ) ) {
 					$run_id = $m[1];
 					if ( ! isset( $objects[ $run_id ] ) ) {
 						$objects[ $run_id ] = array();
@@ -916,7 +920,7 @@ function ndbi_core_backup_s3_apply_retention( $retain_count ) {
  */
 function ndbi_core_backup_s3_get_download_url( $run_id, $type ) {
 	$run_id = sanitize_text_field( $run_id );
-	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}-\d{6}$/', $run_id ) || ! in_array( $type, array( 'db', 'files' ), true ) ) {
+	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}-\d{6}(-[a-f0-9]{6})?$/', $run_id ) || ! in_array( $type, array( 'db', 'files' ), true ) ) {
 		return null;
 	}
 	$client   = ndbi_core_backup_s3_s3_client();
@@ -944,7 +948,7 @@ function ndbi_core_backup_s3_get_download_url( $run_id, $type ) {
  */
 function ndbi_core_backup_s3_delete_run_from_storage( $run_id ) {
 	$run_id = sanitize_text_field( $run_id );
-	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}-\d{6}$/', $run_id ) ) {
+	if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}-\d{6}(-[a-f0-9]{6})?$/', $run_id ) ) {
 		return false;
 	}
 	$client   = ndbi_core_backup_s3_s3_client();

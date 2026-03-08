@@ -80,10 +80,10 @@ function ndbi_core_backup_s3_render_dashboard() {
 	echo '<p class="ndbi-backup-nav">' . esc_html__( 'Dashboard', 'ndbi-core' ) . ' | <a href="' . esc_url( $settings_url ) . '">' . esc_html__( 'Backup Settings', 'ndbi-core' ) . '</a></p>';
 
 	$run_log = ndbi_core_backup_s3_get_run_log();
-	echo '<div class="card" style="max-width: 900px; margin: 1em 0;">';
+	echo '<div class="card ndbi-backup-status-card" style="width: 100%; max-width: none; margin: 1em 0; box-sizing: border-box;">';
 	echo '<h2>' . esc_html__( 'Backup status', 'ndbi-core' ) . '</h2>';
 	if ( ! empty( $run_log ) ) {
-		echo '<table class="widefat striped" style="margin-top: 0.5em;">';
+		echo '<table class="widefat striped" style="margin-top: 0.5em; width: 100%;">';
 		echo '<thead><tr>';
 		echo '<th>' . esc_html__( 'Run ID', 'ndbi-core' ) . '</th>';
 		echo '<th>' . esc_html__( 'Status', 'ndbi-core' ) . '</th>';
