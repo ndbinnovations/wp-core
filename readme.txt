@@ -1,4 +1,4 @@
-=== Ndbi Core ===
+=== NDB Innovations Core ===
 Contributors: ndbinnovations
 Tags: core, managed, ndbi, support
 Requires at least: 5.0

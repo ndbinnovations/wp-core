@@ -29,5 +29,6 @@ require_once NDBI_CORE_PATH . 'includes/config.php';
 
 // Load feature modules.
 require_once NDBI_CORE_PATH . 'includes/admin-footer.php';
+require_once NDBI_CORE_PATH . 'includes/admin-plugin-links.php';
 require_once NDBI_CORE_PATH . 'includes/updater.php';
 require_once NDBI_CORE_PATH . 'includes/safe-defaults.php';
