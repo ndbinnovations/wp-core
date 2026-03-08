@@ -438,6 +438,10 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 		return;
 	}
 
+	if ( $table_index === 0 ) {
+		fwrite( $fp, "SET FOREIGN_KEY_CHECKS = 0;\n" );
+	}
+
 	// Write table header.
 	$create = $wpdb->get_row( "SHOW CREATE TABLE `" . $table_esc . "`", ARRAY_N );
 	if ( $create ) {
@@ -470,6 +474,9 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 				$offset += $batch_size;
 			}
 		}
+	if ( $table_index === count( $tables ) - 1 ) {
+		fwrite( $fp, "SET FOREIGN_KEY_CHECKS = 1;\n" );
+	}
 	fclose( $fp );
 
 	$next = $table_index + 1;
@@ -638,6 +645,9 @@ function ndbi_core_backup_s3_list_files( $dir, $base, $exclude ) {
 		if ( $skip ) {
 			continue;
 		}
+		if ( is_link( $path ) ) {
+			continue;
+		}
 		if ( is_dir( $path ) ) {
 			$list = array_merge( $list, ndbi_core_backup_s3_list_files( $path, $base, $exclude ) );
 		} else {
@@ -681,12 +691,19 @@ function ndbi_core_backup_s3_run_zip_chunk( $run_id ) {
 	for ( $i = $index; $i < $end; $i++ ) {
 		$abs = $list[ $i ];
 		if ( is_file( $abs ) ) {
-			// Path inside ZIP: relative to site root (e.g. wp-config.php, wp-content/plugins/...).
 			$local = ltrim( str_replace( '\\', '/', substr( $abs, $base_len ) ), '/' );
-			$zip->addFile( $abs, $local );
+			if ( ! $zip->addFile( $abs, $local ) ) {
+				ndbi_core_backup_s3_log( 'zip_chunk: addFile failed', array( 'run_id' => $run_id, 'file' => $abs ) );
+			}
 		}
 	}
-	$zip->close();
+	if ( ! $zip->close() ) {
+		ndbi_core_backup_s3_log( 'zip_chunk: ZipArchive close failed', array( 'run_id' => $run_id, 'zip_path' => $zip_path ) );
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not finalise ZIP chunk (disk full?).', 'ndbi-core' ) );
+		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not finalise ZIP chunk (disk full?).', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
+		return;
+	}
 
 	$run['zip_index'] = $end;
 	$all_runs[ $run_id ] = $run;
