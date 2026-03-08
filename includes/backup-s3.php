@@ -280,7 +280,7 @@ function ndbi_core_backup_s3_schedule_finish_db_or_zip( $run_id ) {
 	if ( ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
 		as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
 		ndbi_core_backup_s3_log( 'schedule_finish_db_or_zip: scheduled zip_scan (include_files)', array( 'run_id' => $run_id ) );
-	} elseif ( empty( $run['include_files'] ) ) {
+	} elseif ( empty( $run['include_files'] ) && empty( $run['tables'] ) ) {
 		ndbi_core_backup_s3_cleanup_run( $run_id );
 		ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
 	}
