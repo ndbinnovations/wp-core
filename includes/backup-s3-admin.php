@@ -8,10 +8,21 @@
 defined( 'ABSPATH' ) || exit;
 
 const NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG = 'ndbi-backup-s3';
-const NDBI_CORE_BACKUP_S3_SETTINGS_SLUG  = 'ndbi-backup-s3-settings';
+
+/** Tab query arg for Backup Settings (same page, no separate sidebar item). */
+const NDBI_CORE_BACKUP_S3_TAB_SETTINGS = 'settings';
 
 /**
- * Register Backup and Backup Settings under NDB Innovations (parent ndbi).
+ * URL for the Backup Settings tab (same menu page, tab=settings).
+ *
+ * @return string Admin URL for Backup Settings view.
+ */
+function ndbi_core_backup_s3_settings_url() {
+	return admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG . '&tab=' . NDBI_CORE_BACKUP_S3_TAB_SETTINGS );
+}
+
+/**
+ * Register single Backup menu under NDB Innovations. Dashboard and Settings are tabs (tab=settings) on the same page.
  */
 function ndbi_core_backup_s3_add_admin_page() {
 	$parent = defined( 'NDBI_CORE_ADMIN_PARENT_SLUG' ) ? NDBI_CORE_ADMIN_PARENT_SLUG : 'ndbi';
@@ -21,33 +32,20 @@ function ndbi_core_backup_s3_add_admin_page() {
 		__( 'Backup', 'ndbi-core' ),
 		'manage_options',
 		NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG,
-		'ndbi_core_backup_s3_render_dashboard'
-	);
-	add_submenu_page(
-		$parent,
-		__( 'Backup Settings', 'ndbi-core' ),
-		__( 'Backup Settings', 'ndbi-core' ),
-		'manage_options',
-		NDBI_CORE_BACKUP_S3_SETTINGS_SLUG,
-		'ndbi_core_backup_s3_render_settings'
+		'ndbi_core_backup_s3_render_backup_page'
 	);
 }
 
 /**
- * Hide Backup Settings from the sidebar (page stays registered so direct URL still works).
+ * Single Backup page callback: show dashboard or settings based on tab.
  */
-function ndbi_core_backup_s3_hide_settings_from_sidebar() {
-	$screen = get_current_screen();
-	if ( ! $screen || strpos( $screen->id, 'ndbi' ) === false ) {
-		return;
+function ndbi_core_backup_s3_render_backup_page() {
+	$tab = isset( $_GET['tab'] ) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : '';
+	if ( $tab === NDBI_CORE_BACKUP_S3_TAB_SETTINGS ) {
+		ndbi_core_backup_s3_render_settings();
+	} else {
+		ndbi_core_backup_s3_render_dashboard();
 	}
-	$slug = esc_attr( NDBI_CORE_BACKUP_S3_SETTINGS_SLUG );
-	echo '<style type="text/css">';
-	echo '.ndbi-hide-backup-settings-item { display: none !important; }';
-	echo '</style>';
-	echo '<script type="text/javascript">';
-	echo "(function(){ var a = document.querySelector('#adminmenu a[href*=\"page=" . $slug . "\"]'); if(a){ var li = a.closest('li'); if(li) li.classList.add('ndbi-hide-backup-settings-item'); }})();";
-	echo '</script>';
 }
 
 /**
@@ -59,7 +57,7 @@ function ndbi_core_backup_s3_render_dashboard() {
 	}
 
 	$dashboard_url = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG );
-	$settings_url  = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_SETTINGS_SLUG );
+	$settings_url  = ndbi_core_backup_s3_settings_url();
 
 	if ( isset( $_GET['ndbi_backup_deleted'] ) && '1' === $_GET['ndbi_backup_deleted'] ) {
 		echo '<div class="notice notice-success is-dismissible"><p>';
@@ -170,7 +168,7 @@ function ndbi_core_backup_s3_render_settings() {
 	$dashboard_url = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG );
 	$settings      = ndbi_core_backup_s3_get_settings();
 	$use_constant  = defined( 'NDBI_CORE_BACKUP_SECRET_KEY' );
-	$settings_url  = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_SETTINGS_SLUG );
+	$settings_url  = ndbi_core_backup_s3_settings_url();
 
 	if ( isset( $_GET['ndbi_backup_saved'] ) && '1' === $_GET['ndbi_backup_saved'] ) {
 		echo '<div class="notice notice-success is-dismissible"><p>';
@@ -380,7 +378,7 @@ function ndbi_core_backup_s3_handle_admin_post() {
 			$opt['region']   = $presets[ $preset_id ]['default_region'];
 			$opt['endpoint'] = in_array( $preset_id, array( 'r2', 'custom' ), true ) ? ( isset( $opt['endpoint'] ) ? $opt['endpoint'] : '' ) : '';
 			update_option( NDBI_CORE_S3_OPTION, $opt );
-			wp_safe_redirect( add_query_arg( 'ndbi_preset_applied', '1', admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_SETTINGS_SLUG ) ) );
+			wp_safe_redirect( add_query_arg( 'ndbi_preset_applied', '1', ndbi_core_backup_s3_settings_url() ) );
 			exit;
 		}
 	}
@@ -427,7 +425,7 @@ function ndbi_core_backup_s3_handle_admin_post() {
 		if ( function_exists( 'ndbi_core_backup_s3_schedule_cron' ) ) {
 			ndbi_core_backup_s3_schedule_cron();
 		}
-		$redirect = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_SETTINGS_SLUG );
+		$redirect = ndbi_core_backup_s3_settings_url();
 		if ( $cron_error ) {
 			$redirect = add_query_arg( $cron_error, '1', $redirect );
 		} else {
@@ -465,7 +463,7 @@ function ndbi_core_backup_s3_admin_bar_menu( $wp_admin_bar ) {
 	$title     = esc_html__( 'Backup', 'ndbi-core' ) . ' <span style="' . $dot_style . '" aria-hidden="true"></span>';
 
 	$dashboard_url = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_DASHBOARD_SLUG );
-	$settings_url  = admin_url( 'admin.php?page=' . NDBI_CORE_BACKUP_S3_SETTINGS_SLUG );
+	$settings_url  = ndbi_core_backup_s3_settings_url();
 
 	// Parent item on the left (root-default = left group, next to New etc.).
 	$wp_admin_bar->add_node(
@@ -523,7 +521,6 @@ function ndbi_core_backup_s3_admin_bar_menu( $wp_admin_bar ) {
 }
 
 add_action( 'admin_menu', 'ndbi_core_backup_s3_add_admin_page' );
-add_action( 'admin_head', 'ndbi_core_backup_s3_hide_settings_from_sidebar' );
 add_action( 'admin_init', 'ndbi_core_backup_s3_handle_admin_post' );
 // After default left-side items: New (70), Edit (80). See wp-includes/class-wp-admin-bar.php.
 add_action( 'admin_bar_menu', 'ndbi_core_backup_s3_admin_bar_menu', 85 );
