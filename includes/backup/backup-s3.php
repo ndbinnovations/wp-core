@@ -245,14 +245,25 @@ function ndbi_core_backup_s3_run_orchestrator() {
 		return;
 	}
 
-	$run_id = wp_date( 'Y-m-d-His' );
+	$all_runs = get_option( NDBI_CORE_S3_RUN_OPTION, array() );
+	if ( ! empty( $all_runs ) && is_array( $all_runs ) ) {
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'A backup is already in progress.', 'ndbi-core' ) );
+		return;
+	}
+
+	$run_id = wp_date( 'Y-m-d-His' ) . '-' . substr( md5( uniqid( '', true ) ), 0, 6 );
 	$upload_dir = wp_upload_dir();
 	$base_dir   = isset( $upload_dir['basedir'] ) ? $upload_dir['basedir'] : sys_get_temp_dir();
-	$temp_dir   = $base_dir . '/ndbi-backup-' . $run_id;
+	$temp_dir   = $base_dir . '/ndbi-backup-' . $run_id . '-' . wp_generate_password( 16, false );
 	if ( ! wp_mkdir_p( $temp_dir ) ) {
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not create temp directory.', 'ndbi-core' ) );
 		return;
 	}
+	// Prevent web access to DB dumps and temp files (uploads dir is often public).
+	if ( ! file_put_contents( $temp_dir . '/.htaccess', "Require all denied\n" ) ) {
+		@file_put_contents( $temp_dir . '/.htaccess', "Deny from all\n" );
+	}
+	@file_put_contents( $temp_dir . '/index.php', "<?php\n// Silence is golden.\n" );
 
 	$tables = ndbi_core_backup_s3_get_tables();
 	$run_state = array(
@@ -286,7 +297,10 @@ function ndbi_core_backup_s3_run_orchestrator() {
 }
 
 /**
- * Schedule finish_db (and optionally zip scan) when DB export is done; or just upload if no DB.
+ * Schedule the next step after DB export: finish_db (gzip + upload DB) when there are tables,
+ * or zip_scan when there are no tables but include_files; or cleanup when there is nothing to do.
+ * Do not schedule both finish_db and zip_scan here — when there are tables, only schedule
+ * finish_db; finish_db will schedule zip_scan after the DB is uploaded if include_files is set.
  *
  * @param string $run_id Run ID.
  */
@@ -302,14 +316,15 @@ function ndbi_core_backup_s3_schedule_finish_db_or_zip( $run_id ) {
 			as_schedule_single_action( time(), 'ndbi_core_backup_s3_finish_db', array( $run_id ), NDBI_CORE_S3_GROUP );
 			ndbi_core_backup_s3_log( 'schedule_finish_db_or_zip: scheduled finish_db', array( 'run_id' => $run_id ) );
 		}
+		return;
 	}
 	if ( ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
 		as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
-		ndbi_core_backup_s3_log( 'schedule_finish_db_or_zip: scheduled zip_scan (include_files)', array( 'run_id' => $run_id ) );
-	} elseif ( empty( $run['include_files'] ) && empty( $run['tables'] ) ) {
-		ndbi_core_backup_s3_cleanup_run( $run_id );
-		ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_log( 'schedule_finish_db_or_zip: scheduled zip_scan (no tables, include_files)', array( 'run_id' => $run_id ) );
+		return;
 	}
+	ndbi_core_backup_s3_cleanup_run( $run_id );
+	ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
 }
 
 /**
@@ -362,9 +377,15 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 				}
 				foreach ( $rows as $row ) {
 					$col_names = '`' . implode( '`,`', array_map( function( $col ) { return str_replace( '`', '``', $col ); }, array_keys( $row ) ) ) . '`';
-					$placeholders = implode( ',', array_fill( 0, count( $row ), '%s' ) );
-					$query = $wpdb->prepare( "INSERT INTO `" . $table_esc . "` (" . $col_names . ") VALUES (" . $placeholders . ")", array_values( $row ) );
-					fwrite( $fp, $query . ";\n" );
+					// Preserve NULL in SQL; $wpdb->prepare( '%s', $v ) turns NULL into empty string and corrupts restores.
+					$values = array();
+					foreach ( $row as $v ) {
+						$values[] = ( $v === null )
+							? 'NULL'
+							: $wpdb->prepare( '%s', $v );
+					}
+					$query = "INSERT INTO `" . $table_esc . "` (" . $col_names . ") VALUES (" . implode( ',', $values ) . ");\n";
+					fwrite( $fp, $query );
 				}
 				$offset += $batch_size;
 			}
@@ -380,7 +401,7 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 }
 
 /**
- * Gzip DB file and upload to B2; then schedule zip scan if include_files, else mark done.
+ * Gzip DB file and schedule upload to S3. zip_scan is scheduled only after the DB upload completes (in run_upload).
  *
  * @param string $run_id Run ID.
  */
@@ -394,14 +415,9 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 	$run     = $all_runs[ $run_id ];
 	$db_file = $run['temp_dir'] . '/db.sql';
 	if ( ! file_exists( $db_file ) ) {
-		ndbi_core_backup_s3_log( 'finish_db: db.sql missing (no tables?), scheduling zip_scan', array( 'run_id' => $run_id, 'include_files' => ! empty( $run['include_files'] ) ) );
-		if ( ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
-			ndbi_core_backup_s3_set_run_step( $run_id, 'scanning_files', __( 'Scanning files…', 'ndbi-core' ) );
-			as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
-		} else {
-			ndbi_core_backup_s3_cleanup_run( $run_id );
-			ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
-		}
+		ndbi_core_backup_s3_log( 'finish_db: db.sql missing', array( 'run_id' => $run_id ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
+		ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
 		return;
 	}
 
@@ -427,12 +443,7 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 	if ( function_exists( 'as_schedule_single_action' ) ) {
 		as_schedule_single_action( time(), 'ndbi_core_backup_s3_upload', array( $run_id, 'db', $gz_file, $key_suffix ), NDBI_CORE_S3_GROUP );
 	}
-
-	if ( ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
-		ndbi_core_backup_s3_set_run_step( $run_id, 'scanning_files', __( 'Scanning files…', 'ndbi-core' ) );
-		as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
-		ndbi_core_backup_s3_log( 'finish_db: scheduled zip_scan (include_files)', array( 'run_id' => $run_id ) );
-	}
+	// zip_scan is scheduled only after the DB upload completes (in run_upload) so the pipeline is strictly ordered and we avoid duplicate/race behaviour.
 }
 
 /**
@@ -590,7 +601,7 @@ function ndbi_core_backup_s3_zip_done_and_cleanup( $run_id ) {
 }
 
 /**
- * Upload a file to B2 (PutObject or multipart). Then remove temp file and optionally cleanup run.
+ * Upload a file to S3 (PutObject or multipart). On success, remove temp file; if type is 'db' and include_files, schedule zip_scan; else maybe_finish_run.
  *
  * @param string $run_id     Run ID.
  * @param string $type      'db' or 'files'.
@@ -659,10 +670,14 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 	update_option( 'ndbi_core_backup_s3_last_success', $success_times );
 	@unlink( $file_path );
 
-	// Only finish the run when the final upload is done. If we just uploaded DB and
-	// include_files is true, zip_scan/files upload will run later — do not cleanup yet.
 	$all_runs = get_option( NDBI_CORE_S3_RUN_OPTION, array() );
 	$run      = is_array( $all_runs ) && isset( $all_runs[ $run_id ] ) ? $all_runs[ $run_id ] : array();
+	if ( $type === 'db' && ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
+		ndbi_core_backup_s3_set_run_step( $run_id, 'scanning_files', __( 'Scanning files…', 'ndbi-core' ) );
+		as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
+		ndbi_core_backup_s3_log( 'upload: DB done, scheduled zip_scan', array( 'run_id' => $run_id ) );
+		return;
+	}
 	$is_final = ( $type === 'files' ) || ( empty( $run['include_files'] ) );
 	ndbi_core_backup_s3_log( 'upload: is_final check', array( 'run_id' => $run_id, 'type' => $type, 'include_files' => ! empty( $run['include_files'] ), 'is_final' => $is_final ) );
 	if ( $is_final ) {

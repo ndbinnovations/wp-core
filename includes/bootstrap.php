@@ -41,7 +41,29 @@ require_once NDBI_CORE_PATH . 'includes/admin/footer.php';
 require_once NDBI_CORE_PATH . 'includes/admin/plugin-links.php';
 
 // Feature modules (conditionally loaded).
-if ( ndbi_core_is_feature_enabled( 'backup_s3' ) ) {
+// Backup S3 requires PHP 8.1+ (AWS SDK and dependencies). Skip loading on older PHP to avoid fatal errors.
+if ( ndbi_core_is_feature_enabled( 'backup_s3' ) && version_compare( PHP_VERSION, '8.1.0', '>=' ) ) {
 	require_once NDBI_CORE_PATH . 'includes/backup/backup-s3.php';
 	require_once NDBI_CORE_PATH . 'includes/backup/backup-s3-admin.php';
+} elseif ( ndbi_core_is_feature_enabled( 'backup_s3' ) ) {
+	add_action( 'admin_notices', 'ndbi_core_backup_s3_php_version_notice' );
+}
+
+/**
+ * Admin notice when Backup to S3 is enabled but PHP is below the required version.
+ */
+function ndbi_core_backup_s3_php_version_notice() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+	echo '<div class="notice notice-warning"><p>';
+	echo esc_html(
+		sprintf(
+			/* translators: 1: required PHP version (e.g. 8.1), 2: current PHP version */
+			__( 'Backup to S3 is enabled but requires PHP %1$s or later. This site is running PHP %2$s. The feature is disabled until PHP is upgraded.', 'ndbi-core' ),
+			'8.1',
+			PHP_VERSION
+		)
+	);
+	echo '</p></div>';
 }
