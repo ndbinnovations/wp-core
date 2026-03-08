@@ -355,6 +355,7 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 	if ( ! $fp ) {
 		ndbi_core_backup_s3_set_last_status( 'error', __( 'Could not open DB file for append.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Could not open DB file for append.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
 
@@ -416,8 +417,14 @@ function ndbi_core_backup_s3_run_finish_db( $run_id ) {
 	$db_file = $run['temp_dir'] . '/db.sql';
 	if ( ! file_exists( $db_file ) ) {
 		ndbi_core_backup_s3_log( 'finish_db: db.sql missing', array( 'run_id' => $run_id ) );
-		ndbi_core_backup_s3_cleanup_run( $run_id );
-		ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'DB export file missing.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'DB export file missing.', 'ndbi-core' ) );
+		if ( ! empty( $run['include_files'] ) && function_exists( 'as_schedule_single_action' ) ) {
+			ndbi_core_backup_s3_set_run_step( $run_id, 'scanning_files', __( 'Scanning files…', 'ndbi-core' ) );
+			as_schedule_single_action( time(), 'ndbi_core_backup_s3_zip_scan', array( $run_id ), NDBI_CORE_S3_GROUP );
+		} else {
+			ndbi_core_backup_s3_cleanup_run( $run_id );
+		}
 		return;
 	}
 
@@ -615,6 +622,8 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 	ndbi_core_backup_s3_log( 'upload started', array( 'run_id' => $run_id, 'type' => $type, 'file_path' => $file_path, 'key_suffix' => $key_suffix, 'file_exists' => file_exists( $file_path ) ) );
 	if ( ! file_exists( $file_path ) ) {
 		ndbi_core_backup_s3_log( 'upload: file missing, aborting', array( 'run_id' => $run_id, 'type' => $type, 'file_path' => $file_path ) );
+		ndbi_core_backup_s3_set_run_step( $run_id, 'error', __( 'Upload file missing.', 'ndbi-core' ) );
+		ndbi_core_backup_s3_set_last_status( 'error', __( 'Upload file missing.', 'ndbi-core' ) );
 		ndbi_core_backup_s3_cleanup_run( $run_id );
 		return;
 	}
@@ -641,10 +650,8 @@ function ndbi_core_backup_s3_run_upload( $run_id, $type, $file_path, $key_suffix
 	try {
 		$size = filesize( $file_path );
 		if ( $size >= NDBI_CORE_S3_MULTIPART_THRESHOLD ) {
-			// Omit ACL for S3-compatible APIs (e.g. B2, R2) that may not support it.
 			$client->upload( $bucket, $key, $fh, '', array(
 				'mup_threshold' => NDBI_CORE_S3_MULTIPART_THRESHOLD,
-				'params'        => array( 'ACL' => null ),
 			) );
 		} else {
 			$client->putObject( array(
