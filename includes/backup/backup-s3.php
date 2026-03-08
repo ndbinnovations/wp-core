@@ -402,6 +402,7 @@ function ndbi_core_backup_s3_schedule_finish_db_or_zip( $run_id ) {
 		ndbi_core_backup_s3_log( 'schedule_finish_db_or_zip: scheduled zip_scan (no tables, include_files)', array( 'run_id' => $run_id ) );
 		return;
 	}
+	ndbi_core_backup_s3_set_run_step( $run_id, 'done', __( 'Backup completed.', 'ndbi-core' ) );
 	ndbi_core_backup_s3_cleanup_run( $run_id );
 	ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
 }
@@ -450,30 +451,30 @@ function ndbi_core_backup_s3_run_export_db( $run_id, $table_index ) {
 		fwrite( $fp, $create[1] . ";\n" );
 	}
 	$cols = $wpdb->get_col( "SHOW COLUMNS FROM `" . $table_esc . "`" );
-		if ( $cols ) {
-			$batch_size = 500;
-			$offset     = 0;
-			while ( true ) {
-				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				$rows = $wpdb->get_results( "SELECT * FROM `" . $table_esc . "` LIMIT " . (int) $offset . ',' . (int) $batch_size, ARRAY_A );
-				if ( empty( $rows ) ) {
-					break;
-				}
-				foreach ( $rows as $row ) {
-					$col_names = '`' . implode( '`,`', array_map( function( $col ) { return str_replace( '`', '``', $col ); }, array_keys( $row ) ) ) . '`';
-					// Preserve NULL in SQL; $wpdb->prepare( '%s', $v ) turns NULL into empty string and corrupts restores.
-					$values = array();
-					foreach ( $row as $v ) {
-						$values[] = ( $v === null )
-							? 'NULL'
-							: $wpdb->prepare( '%s', $v );
-					}
-					$query = "INSERT INTO `" . $table_esc . "` (" . $col_names . ") VALUES (" . implode( ',', $values ) . ");\n";
-					fwrite( $fp, $query );
-				}
-				$offset += $batch_size;
+	if ( $cols ) {
+		$batch_size = 500;
+		$offset     = 0;
+		while ( true ) {
+			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$rows = $wpdb->get_results( "SELECT * FROM `" . $table_esc . "` LIMIT " . (int) $offset . ',' . (int) $batch_size, ARRAY_A );
+			if ( empty( $rows ) ) {
+				break;
 			}
+			foreach ( $rows as $row ) {
+				$col_names = '`' . implode( '`,`', array_map( function( $col ) { return str_replace( '`', '``', $col ); }, array_keys( $row ) ) ) . '`';
+				// Preserve NULL in SQL; $wpdb->prepare( '%s', $v ) turns NULL into empty string and corrupts restores.
+				$values = array();
+				foreach ( $row as $v ) {
+					$values[] = ( $v === null )
+						? 'NULL'
+						: $wpdb->prepare( '%s', $v );
+				}
+				$query = "INSERT INTO `" . $table_esc . "` (" . $col_names . ") VALUES (" . implode( ',', $values ) . ");\n";
+				fwrite( $fp, $query );
+			}
+			$offset += $batch_size;
 		}
+	}
 	if ( $table_index === count( $tables ) - 1 ) {
 		fwrite( $fp, "SET FOREIGN_KEY_CHECKS = 1;\n" );
 	}
@@ -729,6 +730,7 @@ function ndbi_core_backup_s3_run_zip_chunk( $run_id ) {
  * @param string $run_id Run ID.
  */
 function ndbi_core_backup_s3_zip_done_and_cleanup( $run_id ) {
+	ndbi_core_backup_s3_set_run_step( $run_id, 'done', __( 'Backup completed.', 'ndbi-core' ) );
 	ndbi_core_backup_s3_cleanup_run( $run_id );
 	ndbi_core_backup_s3_set_last_status( 'success', __( 'Backup completed.', 'ndbi-core' ) );
 }
