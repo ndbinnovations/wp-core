@@ -1,0 +1,73 @@
+# Build plugin zip and create a GitHub Release for the NDBI Core updater.
+# Trigger: push a version tag (e.g. v0.1.0). The workflow checks that NDBI_CORE_VERSION in ndbi-core.php
+# matches the tag so you don't release with an outdated version.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate version matches tag
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          FILE_VERSION=$(grep "NDBI_CORE_VERSION" ndbi-core.php | head -1 | sed -n "s/.*'\([0-9.]*\)'.*/\1/p")
+          if [[ -z "$FILE_VERSION" ]]; then
+            echo "Could not read NDBI_CORE_VERSION from ndbi-core.php"
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$FILE_VERSION" ]]; then
+            echo "Version mismatch: tag is v$TAG_VERSION but NDBI_CORE_VERSION in ndbi-core.php is $FILE_VERSION"
+            echo "Bump the constant to match the tag, then push the tag again (or use a matching tag)."
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing version $TAG_VERSION (tag and file agree)"
+
+      - name: Sync version into readme and plugin header (for the zip only)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^Stable tag:.*/Stable tag: $VERSION/" readme.txt
+          sed -i "s/^ \* Version:.*/ * Version:         $VERSION/" ndbi-core.php
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-dev --prefer-dist
+
+      - name: Build release zip
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP_NAME="ndbi-core-${VERSION}.zip"
+          EXCLUDE_ARGS=()
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^#.*$ || -z "${line// }" ]] && continue
+            EXCLUDE_ARGS+=( -x "$line" )
+          done < .distignore
+          zip -r "$ZIP_NAME" . "${EXCLUDE_ARGS[@]}"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
